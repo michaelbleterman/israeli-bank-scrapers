@@ -312,6 +312,8 @@ if (result.success && result.deviceTrustData) {
 
 The `deviceTrustData` option is available for all browser-based scrapers, but the OTP flow is currently specific to Hapoalim.
 
+For a complete, runnable end-to-end example (first login with an SMS OTP prompt, then a second login that reuses the saved device trust to skip the OTP), see [`examples/hapoalim-2fa-device-trust.ts`](examples/hapoalim-2fa-device-trust.ts).
+
 ## Bank Leumi scraper
 This scraper expects the following credentials object:
 ```node
