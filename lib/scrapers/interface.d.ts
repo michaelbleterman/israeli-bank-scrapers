@@ -1,5 +1,6 @@
 import { type BrowserContext, type Browser, type CookieData, type Page } from 'puppeteer';
 import { type CompanyTypes, type ScraperProgressTypes } from '../definitions';
+import { type PortfolioAccount } from '../portfolio';
 import { type TransactionsAccount } from '../transactions';
 import { type ErrorResult, type ScraperErrorTypes } from './errors';
 export type ScraperCredentials = {
@@ -184,6 +185,11 @@ export interface OutputDataOptions {
 export interface ScraperScrapingResult {
     success: boolean;
     accounts?: TransactionsAccount[];
+    /**
+     * Portfolio accounts returned by brokerage scrapers (e.g. Excellence).
+     * Populated instead of `accounts` for snapshot-style holdings scrapers.
+     */
+    portfolioAccounts?: PortfolioAccount[];
     futureDebits?: FutureDebit[];
     errorType?: ScraperErrorTypes;
     errorMessage?: string;

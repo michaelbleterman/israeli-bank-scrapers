@@ -17,7 +17,8 @@ export declare enum CompanyTypes {
     behatsdaa = "behatsdaa",
     beyahadBishvilha = "beyahadBishvilha",
     oneZero = "oneZero",
-    pagi = "pagi"
+    pagi = "pagi",
+    excellence = "excellence"
 }
 export declare const SCRAPERS: {
     hapoalim: {
@@ -89,6 +90,10 @@ export declare const SCRAPERS: {
         loginFields: string[];
     };
     pagi: {
+        name: string;
+        loginFields: string[];
+    };
+    excellence: {
         name: string;
         loginFields: string[];
     };
