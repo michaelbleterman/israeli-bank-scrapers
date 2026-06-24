@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — design + live API capture done; implementation pending |
+| **Status** | Draft — design + live API capture + 2FA/device-trust validation done; implementation pending |
 | **Branch** | `feat/excellence-portfolio-scraper` |
 | **Target** | `https://extradepro.xnes.co.il` (Excellence Trade / Extrade Pro, owned by The Phoenix) |
 | **Goal** | Scrape **live portfolio positions + total account value** (a snapshot) |
@@ -63,8 +63,8 @@ returns**. Everything else is reused verbatim.
 | Browser launch / attach / context, viewport, `cleanups` stack | `base-scraper-with-browser.ts` | ✅ as-is |
 | Generic form login via `getLoginOptions()` + `possibleResults` URL matching | `base-scraper-with-browser.ts:245` | ✅ as-is |
 | `navigateTo`, screenshot-on-failure, `defaultTimeout` | `base-scraper-with-browser.ts` | ✅ as-is |
-| **2FA**: `otpCodeRetriever` callback pattern | Hapoalim / OneZero | ✅ reuse |
-| **Device trust**: cookies + origin-scoped localStorage inject/extract | `base-scraper-with-browser.ts:337` | ✅ as-is |
+| **2FA**: `otpCodeRetriever` callback pattern | Hapoalim / OneZero | ➖ not needed (no OTP — §7.1); keep defensive detection only |
+| **Device trust**: cookies + origin-scoped localStorage inject/extract | `base-scraper-with-browser.ts:337` | ➖ not needed (no client trust artifact — §7.5) |
 | In-page JSON fetch | `src/helpers/fetch.ts` | ⚠️ reuse, but must add `session`/`csession` headers (token auth, not cookies — see §7.1) |
 | Element/navigation/waiting helpers, `getDebug('excellence')` | `src/helpers/` | ✅ reuse |
 | Registration path (`CompanyTypes` + `SCRAPERS` + `factory.ts` + credentials union) | `definitions.ts`, `factory.ts`, `interface.ts` | ✅ same pattern, additive |
@@ -193,11 +193,15 @@ HTML is never parsed.
   `fetch` helpers must add these headers explicitly (read `SessionKey` from the login
   response / app state), OR the scraper reuses the app's own request path. A plain
   `fetchGetWithinPage` will **not** auto-authenticate the way a cookie-based bank does.
-- **2FA / OTP:** confirmed **no OTP prompt** on this login — username+password alone
-  reached `/app`. The device is already trusted, so trust persists across sessions. A
-  first-time login from a clean browser/IP likely still triggers OTP; the trust artifact
-  (cookie vs localStorage vs server-side device registration) was **not** isolated and is
-  the one remaining unknown (see §7.5).
+- **2FA / OTP — validated, none required.** Two logins were tested: (a) the normal session,
+  and (b) a login from a **fully cleared context** — `context.clearCookies()` plus wiped
+  localStorage, sessionStorage, and IndexedDB, i.e. a brand-new-device equivalent. **Both
+  reached `/app` with username + password only; no OTP/SMS was ever prompted.** This rules
+  out client-side device trust (there was nothing to carry, yet a clean device still logged
+  in). See §7.5 for the storage audit. **Conclusion:** the scraper needs only
+  username + password — no `otpCodeRetriever`, no `deviceTrustData`. (Caveat: tested on one
+  account; 2FA could be enabled per-account, so the scraper should still *detect* an OTP
+  challenge defensively — see §8.)
 
 ### 7.2 Post-login flow (observed order)
 1. `POST /api/v2/json2/login` → `SessionKey`.
@@ -255,13 +259,26 @@ Balance[]                                  Meta.Security[] (joined by Key)
 Terminology: `NV` = nominal value (quantity / face value), `VL` = value (market value),
 `Nis` = ILS. Sample account had 17 positions.
 
-### 7.5 One remaining unknown — the device-trust artifact
-What makes this device "trusted" (so OTP is skipped) was not isolated, because doing so
-means logging out / using a clean profile and possibly triggering a real OTP. To finalize
-the `deviceTrustData` design we still need one capture: from a **fresh browser profile**,
-log in, complete the OTP once, then diff cookies + localStorage to find the persistent
-trust key and its origin. Until then, assume the scraper must support an `otpCodeRetriever`
-for first run and persist whatever cookie/localStorage the trusted session carries.
+### 7.5 Storage audit — no persistent auth or device-trust artifact
+Full client-storage audit of a logged-in session (values redacted throughout):
+
+| Store | Entries | Auth/trust relevant? |
+|---|---|---|
+| Cookies | `_ga`, `_ga_XB6GC1W64C` (Google Analytics, `.xnes.co.il`, ~400d), `GCLB` (httpOnly, **session-scoped** GCP load-balancer affinity) | **No** |
+| localStorage | `lastActive`, `SOLITICS_CONFIGURATION` (marketing SDK), `TRANSACTIONS_QUEUE_NAME`, `recentKeys` | **No** |
+| sessionStorage | `state` (~33 KB app state), `csession`, `orders-cart` | Holds the **ephemeral** `session`/`csession` tokens — **tab-scoped, wiped on close** |
+| IndexedDB | `firebase-heartbeat-database` (push-notification heartbeat) | **No** |
+
+Findings:
+- The `session`/`csession` auth tokens live **only in sessionStorage** (ephemeral) and are
+  regenerated on every login from the `SessionKey` returned by `POST /login`.
+- There is **no long-lived device-trust token** anywhere on the client.
+- A login from a **fully wiped context still required no OTP** (§7.1), so trust is not
+  client-side. Whatever suppresses OTP is server-side (e.g. account 2FA disabled, or
+  IP/fingerprint recognition) and is outside the scraper's control or need.
+
+**Design consequence:** drop `deviceTrustData` and `otpCodeRetriever` from this scraper's
+required path — plain username + password is sufficient. This unknown is now **closed**.
 
 ---
 
@@ -273,8 +290,7 @@ genuinely new.
 1. **New** `src/portfolio.ts` — `AssetType`, `Position`, `PortfolioAccount`.
 2. **Edit** `src/scrapers/interface.ts` — add `portfolioAccounts?` to
    `ScraperScrapingResult`; add Excellence credentials shape to the `ScraperCredentials`
-   union: `{ username; password; otpCodeRetriever? }` (OTP only needed on an untrusted
-   device — see §7.1/§7.5).
+   union: **`{ username; password }`** (validated: no OTP / no device trust — §7.1/§7.5).
 3. **Edit** `src/definitions.ts` — add `excellence` to `CompanyTypes` and a `SCRAPERS`
    entry (`name: 'Excellence'`, `loginFields: ['username', PASSWORD_FIELD]`).
 4. **New** `src/scrapers/excellence.ts` — `extends BaseScraperWithBrowser`:
@@ -289,13 +305,16 @@ genuinely new.
      cookie-based `fetchGetWithinPage` is insufficient (§7.1).
 5. **Edit** `src/scrapers/factory.ts` — one `case CompanyTypes.excellence`.
 6. **Edit** `src/index.ts` — export `Position` / `PortfolioAccount` / `AssetType`.
+   - **Defensive 2FA detection:** although this account needs no OTP, add an OTP/2FA
+     challenge screen as a recognized `possibleResults` outcome so accounts that *do* have
+     2FA fail loudly (clear error) instead of silently — full OTP support can come later if
+     a 2FA-enabled account is available to capture.
 7. **Tests** — mock-data unit test for the §7.4 mapping; real-API test gated on credentials
    per `CONTRIBUTING.md`.
 
-### Open item before/with implementation
-- Isolate the **device-trust artifact** (§7.5) via one clean-profile login, to wire
-  `deviceTrustData` capture/inject correctly and confirm whether `otpCodeRetriever` is
-  mandatory on first run.
+### Open items
+- _None blocking._ Device-trust/OTP question is **closed** (§7.5). If a 2FA-enabled account
+  becomes available, capture its OTP flow to implement `otpCodeRetriever` for that case.
 
 ---
 
