@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — design + live API capture + 2FA/device-trust validation done; implementation pending |
+| **Status** | Implemented — scraper + unit tests + live e2e validated (2026-06-24); auth model corrected against live run (§7.1) |
 | **Branch** | `feat/excellence-portfolio-scraper` |
 | **Target** | `https://extradepro.xnes.co.il` (Excellence Trade / Extrade Pro, owned by The Phoenix) |
 | **Goal** | Scrape **live portfolio positions + total account value** (a snapshot) |
@@ -183,16 +183,26 @@ HTML is never parsed.
 > Chromium on an Israeli IP is expected to get through; an Israeli IP is likely required.
 
 ### 7.1 Authentication
-- **Login:** `POST /api/v2/json2/login` with username + password (the only two form fields:
-  `שם משתמש` / `סיסמה`). Response body (`resp-login.json`):
-  `Login.SessionKey` (the session token), plus `-LastLogin`, `-PasswordExpiry`,
-  `Capabilities`, `Attributes` (incl. display name).
+> **Corrected against the live implementation run (2026-06-24).** The login *body* and the
+> `session`/`csession` relationship below supersede the earlier capture notes (the Hebrew
+> strings `שם משתמש`/`סיסמה` are the on-screen field **labels**, not the JSON keys).
+
+- **Login:** `POST /api/v2/json2/login` with the JSON body
+  **`{"Login":{"User":"<username>","Password":"<password>"}}`** and a `csession` request
+  header (see below). Response body: `Login.SessionKey` (a UUID — the session token), plus
+  `-LastLogin`, `-PasswordExpiry`, `Capabilities`, `Attributes` (incl. display name `Name`).
 - **Session is token-based, not cookie-based.** Authenticated calls carry two **custom
-  request headers — `session` and `csession`** — derived from `SessionKey`. There is no
-  `Authorization` header and no auth cookie. **Implication for the scraper:** the in-page
-  `fetch` helpers must add these headers explicitly (read `SessionKey` from the login
-  response / app state), OR the scraper reuses the app's own request path. A plain
-  `fetchGetWithinPage` will **not** auto-authenticate the way a cookie-based bank does.
+  request headers**:
+  - **`session`** = the `Login.SessionKey` UUID from the login response.
+  - **`csession`** = a **client-generated** value (the SPA uses `String(Math.random())`,
+    e.g. `"0.4381..."`). It is sent on **every** request **including `/login` itself**, and
+    the server binds the issued `SessionKey` to whatever `csession` accompanied the login —
+    so the **same** `csession` must be reused for the whole session. It is not derived from
+    `SessionKey`.
+  - There is no `Authorization` header and no auth cookie. **Implication for the scraper:**
+    the in-page `fetch` helpers must set both headers explicitly; a plain cookie-based
+    `fetchGetWithinPage` will **not** auto-authenticate. (Implemented in
+    `src/scrapers/excellence.ts`.)
 - **2FA / OTP — validated, none required.** Two logins were tested: (a) the normal session,
   and (b) a login from a **fully cleared context** — `context.clearCookies()` plus wiped
   localStorage, sessionStorage, and IndexedDB, i.e. a brand-new-device equivalent. **Both
