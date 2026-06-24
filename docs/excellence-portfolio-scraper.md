@@ -2,16 +2,17 @@
 
 | | |
 |---|---|
-| **Status** | Draft — design complete, empirical research pending |
+| **Status** | Draft — design + live API capture done; implementation pending |
 | **Branch** | `feat/excellence-portfolio-scraper` |
 | **Target** | `https://extradepro.xnes.co.il` (Excellence Trade / Extrade Pro, owned by The Phoenix) |
 | **Goal** | Scrape **live portfolio positions + total account value** (a snapshot) |
 | **Non-goal** | Bank-style cash transaction history |
 | **Date** | 2026-06-24 |
 
-> Implementation and testing are deliberately out of scope for this document. Section 7
-> ("Empirical research") lists the live-capture work that must be completed **before**
-> implementation can begin.
+> Implementation and testing are deliberately out of scope for this document. The API
+> surface in Section 7 was captured from a live, logged-in session (DevTools / Playwright);
+> field names and types are documented, but no real account values or tokens are recorded
+> here.
 
 ---
 
@@ -64,7 +65,7 @@ returns**. Everything else is reused verbatim.
 | `navigateTo`, screenshot-on-failure, `defaultTimeout` | `base-scraper-with-browser.ts` | ✅ as-is |
 | **2FA**: `otpCodeRetriever` callback pattern | Hapoalim / OneZero | ✅ reuse |
 | **Device trust**: cookies + origin-scoped localStorage inject/extract | `base-scraper-with-browser.ts:337` | ✅ as-is |
-| In-page JSON fetch (carries the platform's own session/cookies) | `src/helpers/fetch.ts` | ✅ reuse |
+| In-page JSON fetch | `src/helpers/fetch.ts` | ⚠️ reuse, but must add `session`/`csession` headers (token auth, not cookies — see §7.1) |
 | Element/navigation/waiting helpers, `getDebug('excellence')` | `src/helpers/` | ✅ reuse |
 | Registration path (`CompanyTypes` + `SCRAPERS` + `factory.ts` + credentials union) | `definitions.ts`, `factory.ts`, `interface.ts` | ✅ same pattern, additive |
 
@@ -89,10 +90,11 @@ export enum AssetType {
 }
 
 export interface Position {
-  name: string;            // security name
-  symbol?: string;         // ticker
-  isin?: string;           // security id (IL "paper number" / ISIN)
-  assetType?: AssetType;
+  name: string;            // security name        <- Meta.Security.HebName/EngName
+  symbol?: string;         // ticker               <- Meta.Security.Symbol (often null for IL)
+  securityId: string;      // Excellence EquityNumber/Key (their internal id, NOT ISIN)
+  isin?: string;           // ISIN if resolvable (not directly in balances response)
+  assetType?: AssetType;   // <- Meta.Security.ItemType/StockType/IsEtf/IsForeign
   exchange?: string;
 
   quantity: number;
@@ -129,9 +131,14 @@ export interface PortfolioAccount {
   drift. Keep `rawPosition` for fidelity.
 - **`includeRawPosition`** — reuse the existing `includeRawTransaction` option flag (or add
   a parallel one) to gate `rawPosition`.
+- **Identifier reality.** The balances response identifies securities by Excellence's
+  internal `EquityNumber` (`securityId`), not ISIN. ISIN is not in that payload; if needed
+  it must be resolved via a separate market/security lookup, so `isin` is optional.
+- **Quantity/value source.** Use `OnlineNV` for `quantity`, `OnlineVL` for `marketValue`
+  (native currency) and keep `OnlineNisVL` as an ILS-converted value; `AveragePrice` →
+  `averageCost`. These map cleanly (see §7.4).
 
-> Field names above are provisional and will be reconciled against the actual platform
-> response in Section 7.
+> Field names reconciled against the live response in Section 7.
 
 ---
 
@@ -164,43 +171,97 @@ export interface ScraperScrapingResult {
 
 ---
 
-## 7. Empirical research (MUST complete before implementation)
+## 7. Captured API surface (live session, 2026-06-24)
 
-The login surface is gated behind a WAF (the login page returned **HTTP 473** to an
-unauthenticated, non-Israeli fetch) and almost certainly requires an Israeli IP, a real
-account, and 2FA. These items can only be resolved with the account holder's participation
-and a live, logged-in session.
+Captured by driving a logged-in session from an Israeli IP. The site is a **single-page app
+backed by a clean REST/JSON API** under `https://extradepro.xnes.co.il/api/v2/json2/`
+(a second host prefix `/dapi/v2/json2/` serves delayed/streaming market data). No GraphQL.
+HTML is never parsed.
 
-**Capture checklist** (do a manual login with browser DevTools → Network open, then export
-a HAR, or drive a local browser session):
+> The WAF that returned **HTTP 473** to an unauthenticated US fetch did **not** block a real
+> browser on an Israeli IP — the login page and API loaded normally. A headed Puppeteer
+> Chromium on an Israeli IP is expected to get through; an Israeli IP is likely required.
 
-- [ ] **Login URL & flow** — confirm `https://extradepro.xnes.co.il/login`; record any
-      redirects and the post-login landing URL (needed for `possibleResults`).
-- [ ] **Login fields** — exact input selectors and which identifiers are required
-      (username? ID? password? client number?).
-- [ ] **2FA** — is OTP/SMS enforced on every login? Is there a "trust this device" option?
-      Capture whether device-trust cookies/localStorage suppress re-challenge (drives
-      reuse of `otpCodeRetriever` + `deviceTrustData`).
-- [ ] **Bot protection** — what triggers the 473 / any challenge page; whether a normal
-      Puppeteer Chromium with an Israeli IP gets through.
-- [ ] **Holdings endpoint** — the XHR/GraphQL call(s) that return positions; capture the
-      full request (method, URL, headers, body) and the JSON response shape.
-- [ ] **Account total / cash endpoint** — the call returning total portfolio value, cash
-      balance, and base currency (may be the same response as holdings).
-- [ ] **Account enumeration** — how multiple accounts/portfolios per login are listed.
-- [ ] **Field mapping** — map the real response fields onto Section 5's `Position` /
-      `PortfolioAccount` (symbol, ISIN, quantity, price, market value, avg cost, P/L,
-      asset type, currency).
+### 7.1 Authentication
+- **Login:** `POST /api/v2/json2/login` with username + password (the only two form fields:
+  `שם משתמש` / `סיסמה`). Response body (`resp-login.json`):
+  `Login.SessionKey` (the session token), plus `-LastLogin`, `-PasswordExpiry`,
+  `Capabilities`, `Attributes` (incl. display name).
+- **Session is token-based, not cookie-based.** Authenticated calls carry two **custom
+  request headers — `session` and `csession`** — derived from `SessionKey`. There is no
+  `Authorization` header and no auth cookie. **Implication for the scraper:** the in-page
+  `fetch` helpers must add these headers explicitly (read `SessionKey` from the login
+  response / app state), OR the scraper reuses the app's own request path. A plain
+  `fetchGetWithinPage` will **not** auto-authenticate the way a cookie-based bank does.
+- **2FA / OTP:** confirmed **no OTP prompt** on this login — username+password alone
+  reached `/app`. The device is already trusted, so trust persists across sessions. A
+  first-time login from a clean browser/IP likely still triggers OTP; the trust artifact
+  (cookie vs localStorage vs server-side device registration) was **not** isolated and is
+  the one remaining unknown (see §7.5).
 
-**How the user can help (credentials never pasted into chat):**
-- Option A — perform a manual login and **export a HAR file** of the holdings page load;
-  share the (redacted) HAR so endpoints/response shapes can be mapped.
-- Option B — run a **local browser-automation session** (e.g. Playwright MCP on the user's
-  own Israeli-IP machine) where the user enters credentials/OTP directly into the browser,
-  and we observe the network calls.
+### 7.2 Post-login flow (observed order)
+1. `POST /api/v2/json2/login` → `SessionKey`.
+2. `GET  /api/v2/json2/settings/web-trader-excellence` → UI settings.
+3. `GET  /api/v2/json2/accounts?top=10` → account list (see §7.3).
+4. `POST /api/v2/json2/account/init?account=<acct>` → activates the account for the
+   session (returns `SessionKey`, capabilities again).
+5. `GET  /api/v2/json2/account/view/balances?account=<acct>&currency=ILS&fields=...`
+   → **positions + account totals** (see §7.4). This single call covers the whole goal.
 
-Once Section 7 is filled in, Section 5's model is finalized and implementation (Section 8)
-can proceed.
+Post-login landing URL: `https://extradepro.xnes.co.il/app` (for `possibleResults`:
+success = URL is `/app`; failure stays on `/login`).
+
+### 7.3 Account enumeration — `GET /accounts?top=10`
+```
+UserAccounts.UserAccount[]   // one per portfolio
+  -key      // account number, format "NN-NNNNNN" (e.g. "00-000000")
+  -name     // account holder display name
+  -telCode  -relation  -nickName  -type
+```
+
+### 7.4 ★ Holdings + totals — `GET /account/view/balances?account=<acct>&currency=ILS`
+Single response gives both the account summary and every position.
+
+**Account-level totals** (`View.Account`):
+```
+OnlineValue              // current total portfolio value  -> PortfolioAccount.totalValue
+MorningValue             // start-of-day total value
+OnlineCash               // current cash                   -> PortfolioAccount.cash
+MorningCash
+OnlineCashByCurrency[]    { Code, Value }   // multi-currency cash breakdown
+CurrencyCode             // account base currency (ILS)    -> PortfolioAccount.baseCurrency
+ProfitLoss, ProfitLossPercentage
+OnlineBuyingPower, ExistingCollateral, IncomeToReceive, ... (margin/collateral fields)
+BalanceCacheDate         // ISO timestamp of the snapshot   -> Position.asOf
+```
+
+**Positions** (`View.Account.AccountPosition.Balance[]`, one per holding) joined with
+**security metadata** (`View.Meta.Security[]`) on `EquityNumber` == `-Key`:
+```
+Balance[]                                  Meta.Security[] (joined by Key)
+  EquityNumber  // security id (Excellence    -Key      // == EquityNumber
+                //  internal "key", not ISIN)  HebName / EngName   -> Position.name
+  OnlineNV      // current quantity            HebSymbol/EngSymbol/Symbol -> Position.symbol
+  AvailableNV   // available quantity                              //  (often null for IL)
+  LastRate / BaseRate   -> Position.marketPrice  ItemType / StockType / IsEtf / IsForeign
+  OnlineVL      // market value (security ccy)                     //  -> Position.assetType
+  OnlineNisVL   // market value in ILS
+  AveragePrice  -> Position.averageCost
+  ProfitLoss, AveragePriceProfitLoss, AveragePriceProfitLossPercentage -> P/L fields
+  OnlinePercentage   // weight in portfolio
+  CurrencyCode  -> Position.currency
+  ExpiryDate, ValueDate, SubAccount, SubAccountName, LienNv, LoanNv
+```
+Terminology: `NV` = nominal value (quantity / face value), `VL` = value (market value),
+`Nis` = ILS. Sample account had 17 positions.
+
+### 7.5 One remaining unknown — the device-trust artifact
+What makes this device "trusted" (so OTP is skipped) was not isolated, because doing so
+means logging out / using a clean profile and possibly triggering a real OTP. To finalize
+the `deviceTrustData` design we still need one capture: from a **fresh browser profile**,
+log in, complete the OTP once, then diff cookies + localStorage to find the persistent
+trust key and its origin. Until then, assume the scraper must support an `otpCodeRetriever`
+for first run and persist whatever cookie/localStorage the trusted session carries.
 
 ---
 
@@ -212,16 +273,29 @@ genuinely new.
 1. **New** `src/portfolio.ts` — `AssetType`, `Position`, `PortfolioAccount`.
 2. **Edit** `src/scrapers/interface.ts` — add `portfolioAccounts?` to
    `ScraperScrapingResult`; add Excellence credentials shape to the `ScraperCredentials`
-   union (likely `{ username; password; otpCodeRetriever? }`, pending Section 7).
+   union: `{ username; password; otpCodeRetriever? }` (OTP only needed on an untrusted
+   device — see §7.1/§7.5).
 3. **Edit** `src/definitions.ts` — add `excellence` to `CompanyTypes` and a `SCRAPERS`
-   entry (`name: 'Excellence'`, `loginFields`).
-4. **New** `src/scrapers/excellence.ts` — `extends BaseScraperWithBrowser`; implement
-   `getLoginOptions()` and `fetchData()` (call holdings/total endpoints in-page → map to
-   `portfolioAccounts`).
+   entry (`name: 'Excellence'`, `loginFields: ['username', PASSWORD_FIELD]`).
+4. **New** `src/scrapers/excellence.ts` — `extends BaseScraperWithBrowser`:
+   - `getLoginOptions()` — `loginUrl` `/login`, fields `שם משתמש`/`סיסמה`, success when the
+     post-login URL is `/app`. (The actual submit may be a JSON `POST /login`; if the DOM
+     form is awkward to drive, override `login()` to POST directly like OneZero.)
+   - `fetchData()` — call `GET /accounts` → for each account `POST /account/init` then
+     `GET /account/view/balances?account=<acct>&currency=ILS`, and map `View.Account` +
+     `AccountPosition.Balance[]` ⨝ `Meta.Security[]` into `portfolioAccounts` (§7.4).
+   - **Auth detail:** authenticated requests need the custom `session` / `csession`
+     headers (from `SessionKey`), so the in-page fetch must set them explicitly — a plain
+     cookie-based `fetchGetWithinPage` is insufficient (§7.1).
 5. **Edit** `src/scrapers/factory.ts` — one `case CompanyTypes.excellence`.
 6. **Edit** `src/index.ts` — export `Position` / `PortfolioAccount` / `AssetType`.
-7. **Tests** — mock-data unit test for the mapping; real-API test gated on credentials per
-   `CONTRIBUTING.md`.
+7. **Tests** — mock-data unit test for the §7.4 mapping; real-API test gated on credentials
+   per `CONTRIBUTING.md`.
+
+### Open item before/with implementation
+- Isolate the **device-trust artifact** (§7.5) via one clean-profile login, to wire
+  `deviceTrustData` capture/inject correctly and confirm whether `otpCodeRetriever` is
+  mandatory on first run.
 
 ---
 
