@@ -1,5 +1,5 @@
 /**
- * הר הביטוח (har-habitachon.mof.gov.il) — exploratory traffic capture, NOT a scraper.
+ * הר הביטוח (harb.cma.gov.il) — exploratory traffic capture, NOT a scraper.
  *
  * Purpose: opens a real, visible browser pointed at the portal and lets you log in
  * manually (ID + government eGov OTP flow). While you interact with the page, this
@@ -33,7 +33,7 @@ import path from 'path';
 import readline from 'readline';
 import puppeteer, { type HTTPRequest, type HTTPResponse } from 'puppeteer';
 
-const START_URL = 'https://har-habitachon.mof.gov.il/';
+const START_URL = 'https://harb.cma.gov.il/';
 const OUTPUT_FILE = path.join(os.tmpdir(), `har-habitachon-capture-${Date.now()}.json`);
 
 // Skip obvious static/noise requests so the capture stays readable.
