@@ -36,6 +36,16 @@ const ChangePasswordUrl = '/change-password';
 
 const debug = getDebug('visa-cal');
 
+/**
+ * Budget for waiting on data the Cal SPA writes to sessionStorage after login
+ * ("init", "auth-module"). Both waits depend on the same page hydration, so they
+ * share a single budget. Note this must stay well below any outer/hard timeout of
+ * the caller, so a slow Cal surfaces as a typed TIMEOUT error rather than an
+ * opaque abort. Do not set this to 0 expecting "no timeout" - waitUntil rejects
+ * immediately in that case.
+ */
+const SESSION_DATA_TIMEOUT_MS = 60_000;
+
 enum TrnTypeCode {
   regular = '5',
   credit = '6',
@@ -410,8 +420,8 @@ class VisaCalScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> 
     const initData = await waitUntil(
       () => getFromSessionStorage<InitResponse>(this.page, 'init'),
       'get init data in session storage',
-      10000,
-      1000,
+      SESSION_DATA_TIMEOUT_MS,
+      250,
     );
     if (!initData) {
       throw new Error('could not find "init" data in session storage');
@@ -425,7 +435,7 @@ class VisaCalScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> 
       const authModule = await waitUntil(
         async () => authModuleOrUndefined(await getFromSessionStorage<AuthModule>(this.page, 'auth-module')),
         'get authorization header with valid token in session storage',
-        10_000,
+        SESSION_DATA_TIMEOUT_MS,
         50,
       );
       return `CALAuthScheme ${authModule.auth.calConnectToken}`;
